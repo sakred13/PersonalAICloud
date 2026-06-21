@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-personalcloud}
+      POSTGRES_USER: ${DB_USER:-clouduser}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-clouduser} -d ${DB_NAME:-personalcloud}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-clouduser}:${DB_PASSWORD}@db:5432/${DB_NAME:-personalcloud}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      NODE_ENV: production
+      STORAGE_ROOT: /storage
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-10737418240}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      # Set to 'true' only if serving over HTTPS. Keep false for HTTP (LAN/Tailscale)
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Internal URL of the agent service (container-to-container, not exposed externally)
+      AGENT_URL: http://agent:8000
+    volumes:
+      - ./storage:/storage
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+
+  agent:
+    build: ./agent
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-clouduser}:${DB_PASSWORD}@db:5432/${DB_NAME:-personalcloud}
+      STORAGE_ROOT: /storage
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e4b}
+      LLM_API_KEY: ${LLM_API_KEY:-lm-studio}
+      AGENT_CRON: ${AGENT_CRON:-0 2 * * *}
+    volumes:
+      - ./storage:/storage:ro   # read-only — agent never writes files
+    networks:
+      - internal
+    # Needed on Linux hosts so containers can reach host.docker.internal.
+    # Docker Desktop on Windows/Mac handles this automatically.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${PORT:-80}:80"
+    networks:
+      - internal
+    depends_on:
+      - backend
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:
+
