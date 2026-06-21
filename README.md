@@ -85,6 +85,15 @@ PersonalAICloud/
 
 ---
 
+## 🌐 Remote Access (Tailscale Self-Hosting)
+You can easily transform PersonalAICloud into an actual private cloud accessible securely from anywhere in the world (phone, tablet, laptop) using **Tailscale**:
+
+1. **Install Tailscale** on your host machine (where Docker runs) and your remote devices (e.g. phone, laptop).
+2. Keep `COOKIE_SECURE=false` in your `.env` configuration (required for secure session cookies to work over plain HTTP Tailscale URLs).
+3. Access your private cloud from any of your devices by navigating to `http://<your-machine-tailscale-ip>` or its Tailscale MagicDNS address.
+
+---
+
 ## 🧪 Development & Rebuilds
 If you modify source code components, rebuild and restart the Docker containers to apply updates:
 ```bash
