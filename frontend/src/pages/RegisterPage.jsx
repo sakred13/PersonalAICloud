@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Cloud } from 'lucide-react';
+import { Cloud, Clock } from 'lucide-react';
 import { api } from '../api/client.js';
 import { useAuth } from '../App.jsx';
 
@@ -41,6 +41,7 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [usernameStatus, setUsernameStatus] = useState(null);
   // null | 'checking' | 'available' | 'taken' | 'invalid'
+  const [registered, setRegistered] = useState(false);
 
   const debouncedUsername = useDebounce(form.username, 420);
 
@@ -96,19 +97,60 @@ export default function RegisterPage() {
 
     setLoading(true);
     try {
-      const data = await api.post('/auth/register', {
+      await api.post('/auth/register', {
         username: form.username,
         email: form.email,
         password: form.password,
       });
-      setUser(data.user);
-      navigate('/', { replace: true });
+      setRegistered(true);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
   };
+
+  if (registered) {
+    return (
+      <main className="auth-page">
+        <div className="auth-card" style={{ textAlign: 'center', padding: '40px 30px' }}>
+          <div className="auth-logo">
+            <div className="auth-logo-icon">
+              <Cloud size={22} color="white" strokeWidth={2} />
+            </div>
+            <span className="auth-logo-name">PersonalCloud</span>
+          </div>
+
+          <div style={{
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            width: '64px',
+            height: '64px',
+            borderRadius: '50%',
+            background: 'rgba(245, 158, 11, 0.15)',
+            border: '1px solid rgba(245, 158, 11, 0.3)',
+            margin: '24px auto 16px',
+            color: 'var(--warning)',
+          }}>
+            <Clock size={32} />
+          </div>
+
+          <h1 className="auth-title">Account Created</h1>
+          <p className="auth-subtitle" style={{ fontSize: '15px', lineHeight: '1.5', marginBottom: '24px' }}>
+            Your account <strong>{form.username}</strong> has been successfully registered and is <strong>pending approval</strong>.<br />
+            Please ask an existing system user to approve your registration to get access.
+          </p>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <Link to="/login" className="btn btn-primary btn-full">
+              Back to Sign In
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   /* Username status hint */
   const usernameHint = () => {

@@ -19,6 +19,7 @@ from .config import settings
 from .db import close_db, init_db
 from .routers import jobs as jobs_router
 from .routers import search as search_router
+from .routers import agent as agent_router
 from .routers.jobs import TOOL_REGISTRY, _run_tool_bg
 
 logging.basicConfig(
@@ -66,9 +67,30 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         misfire_grace_time=3600,  # If the container was down, run within 1h of scheduled time
     )
+
+    # 3. Schedule thumbnail generation 30 minutes after tagging window ends
+    thumb_hour = settings.JOB_END_HOUR
+    thumb_minute = settings.JOB_END_MINUTE + 30
+    if thumb_minute >= 60:
+        thumb_hour = (thumb_hour + (thumb_minute // 60)) % 24
+        thumb_minute = thumb_minute % 60
+
+    _scheduler.add_job(
+        func=lambda: _run_tool_bg("generate_thumbnails"),
+        trigger=CronTrigger(hour=thumb_hour, minute=thumb_minute, timezone=settings.TIMEZONE),
+        id="nightly_generate_thumbnails",
+        name="Nightly thumbnail generation",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     _scheduler.start()
     logger.info(
-        "[startup] Scheduler started. tag_images cron: '%s'", settings.AGENT_CRON
+        "[startup] Scheduler started. tag_images cron: '%s', generate_thumbnails at: %02d:%02d (%s)",
+        settings.AGENT_CRON,
+        thumb_hour,
+        thumb_minute,
+        settings.TIMEZONE,
     )
 
     yield  # Application runs here
@@ -94,6 +116,7 @@ app = FastAPI(
 
 app.include_router(search_router.router)
 app.include_router(jobs_router.router)
+app.include_router(agent_router.router)
 
 
 @app.get("/health", tags=["system"])

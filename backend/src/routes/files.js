@@ -134,6 +134,24 @@ router.get('/', authMiddleware, async (req, res) => {
     const { absPath, effectiveUserRoot } = await resolveAccessPath(req, reqPath, owner);
     await fs.ensureDir(absPath);
 
+    // Resolve owner's database user ID
+    let ownerId = req.user.id;
+    if (owner) {
+      const ownerRes = await pool.query('SELECT id FROM users WHERE username = $1', [owner]);
+      if (ownerRes.rows.length > 0) {
+        ownerId = ownerRes.rows[0].id;
+      }
+    }
+
+    // Query public shares for this owner
+    const publicSharesRes = await pool.query(
+      'SELECT folder_path, alias, access_scope, size_limit_gb, (password_hash IS NOT NULL) AS has_password FROM public_shares WHERE owner_id = $1',
+      [ownerId]
+    );
+    const publicSharesMap = new Map(
+      publicSharesRes.rows.map(r => [r.folder_path, r])
+    );
+
     const entries = await fs.readdir(absPath, { withFileTypes: true });
 
     const files = await Promise.all(
@@ -151,6 +169,7 @@ router.get('/', authMiddleware, async (req, res) => {
           }
 
           const relPath = reqPath ? `${reqPath}/${entry.name}` : entry.name;
+          const publicShare = publicSharesMap.get(relPath);
 
           return {
             name: entry.name,
@@ -160,6 +179,11 @@ router.get('/', authMiddleware, async (req, res) => {
             mimeType,
             hasThumbnail,
             path: relPath,
+            isPublic: !!publicShare,
+            publicAlias: publicShare ? publicShare.alias : undefined,
+            publicAccessScope: publicShare ? publicShare.access_scope : undefined,
+            publicSizeLimitGb: publicShare ? publicShare.size_limit_gb : undefined,
+            publicHasPassword: publicShare ? publicShare.has_password : undefined,
           };
         })
     );
@@ -458,6 +482,10 @@ router.delete('/', authMiddleware, async (req, res) => {
           'DELETE FROM shares WHERE owner_id = $1 AND (folder_path = $2 OR folder_path LIKE $3)',
           [req.user.id, reqPath, `${reqPath}/%`]
         ).catch(() => {});
+        await db.query(
+          'DELETE FROM public_shares WHERE owner_id = $1 AND (folder_path = $2 OR folder_path LIKE $3)',
+          [req.user.id, reqPath, `${reqPath}/%`]
+        ).catch(() => {});
       }
 
       await fs.remove(absPath);
@@ -555,6 +583,21 @@ router.post('/move', authMiddleware, async (req, res) => {
             [newPath, row.id]
           );
         }
+
+        // Update public shares
+        const publicShares = await db.query(
+          'SELECT id, folder_path FROM public_shares WHERE owner_id = $1 AND (folder_path = $2 OR folder_path LIKE $3)',
+          [req.user.id, oldPrefix, `${oldPrefix}/%`]
+        );
+        for (const row of publicShares.rows) {
+          const newPath = row.folder_path === oldPrefix
+            ? newPrefix
+            : newPrefix + row.folder_path.slice(oldPrefix.length);
+          await db.query(
+            'UPDATE public_shares SET folder_path = $1 WHERE id = $2',
+            [newPath, row.id]
+          );
+        }
       }
     }
     return res.json({ success: true });
@@ -628,6 +671,21 @@ router.post('/rename', authMiddleware, async (req, res) => {
           : newPrefix + row.folder_path.slice(oldPrefix.length);
         await db.query(
           'UPDATE shares SET folder_path = $1 WHERE id = $2',
+          [newPath, row.id]
+        );
+      }
+
+      // Update public shares
+      const publicShares = await db.query(
+        'SELECT id, folder_path FROM public_shares WHERE owner_id = $1 AND (folder_path = $2 OR folder_path LIKE $3)',
+        [req.user.id, oldPrefix, `${oldPrefix}/%`]
+      );
+      for (const row of publicShares.rows) {
+        const newPath = row.folder_path === oldPrefix
+          ? newPrefix
+          : newPrefix + row.folder_path.slice(oldPrefix.length);
+        await db.query(
+          'UPDATE public_shares SET folder_path = $1 WHERE id = $2',
           [newPath, row.id]
         );
       }

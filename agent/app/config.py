@@ -28,7 +28,7 @@ class Settings:
 
     # ── Scheduler ────────────────────────────────────────────────────────────
     # Standard cron expression for the nightly tag job (default: 2 AM UTC)
-    AGENT_CRON: str = os.environ.get("AGENT_CRON", "0 2 * * *")
+    AGENT_CRON: str = os.environ.get("AGENT_CRON", "0 9 * * *")
     # Timezone for the scheduler and deadline checks
     TIMEZONE: str = os.environ.get("TIMEZONE", "America/Los_Angeles")
 
@@ -59,10 +59,11 @@ class Settings:
     MAX_VIDEO_SIZE: int = int(os.environ.get("MAX_VIDEO_SIZE", "1610612736"))
     # Number of keyframes to extract from the video for visual tagging
     VIDEO_KEYFRAMES_COUNT: int = int(os.environ.get("VIDEO_KEYFRAMES_COUNT", "3"))
-    # UTC hour at which the batch job must stop (exclusive).
+    # Hour at which the batch job must stop (exclusive).
     # The job finishes whatever file it is currently on, then exits.
-    # Default: 4 → job window is 02:00–04:00 UTC.
-    JOB_END_HOUR: int = int(os.environ.get("JOB_END_HOUR", "4"))
+    # Default: 2:30 AM Pacific → job window is 02:00–02:30 AM Pacific.
+    JOB_END_HOUR: int = int(os.environ.get("JOB_END_HOUR", "2"))
+    JOB_END_MINUTE: int = int(os.environ.get("JOB_END_MINUTE", "30"))
 
 
 

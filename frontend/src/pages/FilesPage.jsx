@@ -3,9 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import {
   Cloud, LogOut, Grid, List, Upload,
   FolderPlus, Menu, X, Home, Share2, Users, ChevronRight, Search,
-  Copy, Move, Trash2, Download
+  Copy, Move, Trash2, Download, Bot, UserCheck, Key
 } from 'lucide-react';
-import { api, sharesApi, uploadFiles, searchFiles, getDownloadUrl } from '../api/client.js';
+import { api, sharesApi, adminApi, uploadFiles, searchFiles, getDownloadUrl } from '../api/client.js';
 import { useAuth } from '../App.jsx';
 import { isPreviewable, formatBytes } from '../components/fileUtils.js';
 import FileGrid from '../components/FileGrid.jsx';
@@ -15,6 +15,9 @@ import Breadcrumb from '../components/Breadcrumb.jsx';
 import UploadDropzone from '../components/UploadDropzone.jsx';
 import ShareModal from '../components/ShareModal.jsx';
 import FolderPicker from '../components/FolderPicker.jsx';
+import AgentPanel from '../components/AgentPanel.jsx';
+import UserApprovalsPanel from '../components/UserApprovalsPanel.jsx';
+import SecretsVaultPanel from '../components/SecretsVaultPanel.jsx';
 
 // ── Toast hook ────────────────────────────────────────────────────────────────
 function useToast() {
@@ -57,8 +60,12 @@ export default function FilesPage() {
   const navigate = useNavigate();
   const { toasts, show: showToast } = useToast();
 
+  const username = user?.username || '';
+
   // ── My-files state ─────────────────────────────────────────────────────────
-  const [currentPath, setCurrentPath] = useState('');
+  const [currentPath, setCurrentPath] = useState(() => {
+    return localStorage.getItem(`personalcloud_${username}_currentPath`) || '';
+  });
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState('');
@@ -77,11 +84,49 @@ export default function FilesPage() {
   const [renameValue, setRenameValue] = useState('');
 
   // ── Shared-with-me state ───────────────────────────────────────────────────
-  const [viewSection, setViewSection] = useState('my-files'); // 'my-files' | 'shared'
+  const [viewSection, setViewSection] = useState(() => {
+    return localStorage.getItem(`personalcloud_${username}_viewSection`) || 'my-files';
+  }); // 'my-files' | 'shared'
   const [sharedFolders, setSharedFolders] = useState([]);
-  const [sharedOwner, setSharedOwner] = useState(null);
-  const [sharedBase, setSharedBase] = useState('');
+  const [sharedOwner, setSharedOwner] = useState(() => {
+    return localStorage.getItem(`personalcloud_${username}_sharedOwner`) || null;
+  });
+  const [sharedBase, setSharedBase] = useState(() => {
+    return localStorage.getItem(`personalcloud_${username}_sharedBase`) || '';
+  });
   const [storageInfo, setStorageInfo] = useState(null);
+
+  // ── State Persistence Effects ──────────────────────────────────────────────
+  useEffect(() => {
+    if (username) {
+      localStorage.setItem(`personalcloud_${username}_currentPath`, currentPath);
+    }
+  }, [currentPath, username]);
+
+  useEffect(() => {
+    if (username) {
+      localStorage.setItem(`personalcloud_${username}_viewSection`, viewSection);
+    }
+  }, [viewSection, username]);
+
+  useEffect(() => {
+    if (username) {
+      if (sharedOwner) {
+        localStorage.setItem(`personalcloud_${username}_sharedOwner`, sharedOwner);
+      } else {
+        localStorage.removeItem(`personalcloud_${username}_sharedOwner`);
+      }
+    }
+  }, [sharedOwner, username]);
+
+  useEffect(() => {
+    if (username) {
+      localStorage.setItem(`personalcloud_${username}_sharedBase`, sharedBase);
+    }
+  }, [sharedBase, username]);
+
+  // ── Admin Approvals state ──────────────────────────────────────────────────
+  const [pendingCount, setPendingCount] = useState(0);
 
   // ── Search state ───────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
@@ -89,6 +134,26 @@ export default function FilesPage() {
   const [searchResults, setSearchResults] = useState(null); // null = not in search mode
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState('');
+
+  // ── Frontend Lazy Loading ──────────────────────────────────────────────────
+  const [visibleCount, setVisibleCount] = useState(100);
+
+  const handleScroll = (e) => {
+    const target = e.currentTarget;
+    if (target.scrollHeight - target.scrollTop - target.clientHeight < 80) {
+      const totalAvailable = searchResults !== null ? searchResults.length : files.length;
+      if (visibleCount < totalAvailable) {
+        setVisibleCount(prev => prev + 50);
+      }
+    }
+  };
+
+  useEffect(() => {
+    setVisibleCount(100);
+  }, [currentPath, viewSection, searchResults]);
+
+  const displayedFiles = files.slice(0, visibleCount);
+  const displayedSearchResults = searchResults ? searchResults.slice(0, visibleCount) : null;
 
   const fileInputRef = useRef(null);
   const dragCount = useRef(0);
@@ -116,10 +181,23 @@ export default function FilesPage() {
     } catch { /* silent */ }
   }, []);
 
+  const fetchPendingCount = useCallback(async () => {
+    try {
+      const users = await adminApi.getPendingUsers();
+      setPendingCount(users.length);
+    } catch { /* silent */ }
+  }, []);
+
   useEffect(() => {
     fetchSharedFolders();
     fetchStorageInfo();
-  }, [fetchSharedFolders, fetchStorageInfo]);
+    fetchPendingCount();
+  }, [fetchSharedFolders, fetchStorageInfo, fetchPendingCount]);
+
+  useEffect(() => {
+    const interval = setInterval(fetchPendingCount, 15000);
+    return () => clearInterval(interval);
+  }, [fetchPendingCount]);
 
   // ── Fetch directory listing ────────────────────────────────────────────────
   const fetchFiles = useCallback(async () => {
@@ -392,6 +470,12 @@ export default function FilesPage() {
   // ── Logout ─────────────────────────────────────────────────────────────────
   const handleLogout = async () => {
     await api.post('/auth/logout').catch(() => { });
+    if (username) {
+      localStorage.removeItem(`personalcloud_${username}_currentPath`);
+      localStorage.removeItem(`personalcloud_${username}_viewSection`);
+      localStorage.removeItem(`personalcloud_${username}_sharedOwner`);
+      localStorage.removeItem(`personalcloud_${username}_sharedBase`);
+    }
     setUser(null);
     navigate('/login', { replace: true });
   };
@@ -452,6 +536,56 @@ export default function FilesPage() {
             {sharedFolders.length > 0 && (
               <span className="shared-badge">{sharedFolders.length}</span>
             )}
+          </button>
+
+          <p className="sidebar-section-title" style={{ marginTop: 16 }}>Agents</p>
+
+          <button
+            className={`sidebar-nav-item ${viewSection === 'agent' ? 'active' : ''}`}
+            onClick={() => {
+              setViewSection('agent');
+              setSidebarOpen(false);
+              clearSearch();
+            }}
+            id="ai-agent-nav"
+          >
+            <Bot size={17} />
+            AI Cloud Assistant
+          </button>
+
+          <p className="sidebar-section-title" style={{ marginTop: 16 }}>Administration</p>
+
+          <button
+            className={`sidebar-nav-item ${viewSection === 'approvals' ? 'active' : ''}`}
+            onClick={() => {
+              setViewSection('approvals');
+              setSidebarOpen(false);
+              clearSearch();
+            }}
+            id="user-approvals-nav"
+          >
+            <UserCheck size={17} />
+            User Approvals
+            {pendingCount > 0 && (
+              <span className="shared-badge" style={{ background: 'var(--warning)', color: 'var(--bg-root)' }}>
+                {pendingCount}
+              </span>
+            )}
+          </button>
+
+          <p className="sidebar-section-title" style={{ marginTop: 16 }}>Configuration</p>
+
+          <button
+            className={`sidebar-nav-item ${viewSection === 'secrets' ? 'active' : ''}`}
+            onClick={() => {
+              setViewSection('secrets');
+              setSidebarOpen(false);
+              clearSearch();
+            }}
+            id="secrets-vault-nav"
+          >
+            <Key size={17} />
+            Secrets Vault
           </button>
 
           {storageInfo && (
@@ -517,6 +651,33 @@ export default function FilesPage() {
                 onGoSharedRoot={goToShared}
                 onNavigate={(path) => setCurrentPath(path)}
               />
+            )}
+            {!searchResults && viewSection === 'agent' && (
+              <nav className="breadcrumb">
+                <div className="breadcrumb-item">
+                  <span style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-primary)' }}>
+                    <Bot size={16} style={{ color: 'var(--accent)' }} /> AI Cloud Assistant
+                  </span>
+                </div>
+              </nav>
+            )}
+            {!searchResults && viewSection === 'approvals' && (
+              <nav className="breadcrumb">
+                <div className="breadcrumb-item">
+                  <span style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-primary)' }}>
+                    <UserCheck size={16} style={{ color: 'var(--warning)' }} /> User Approvals
+                  </span>
+                </div>
+              </nav>
+            )}
+            {!searchResults && viewSection === 'secrets' && (
+              <nav className="breadcrumb">
+                <div className="breadcrumb-item">
+                  <span style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-primary)' }}>
+                    <Key size={16} style={{ color: 'var(--accent)' }} /> Secrets Vault
+                  </span>
+                </div>
+              </nav>
             )}
             {searchResults !== null && (
               <span className="search-active-label">
@@ -609,145 +770,159 @@ export default function FilesPage() {
         </header>
 
         {/* Files area */}
-        <main className="files-area" id="files-area">
-
-          {/* Master Select Bar */}
-          {viewSection === 'my-files' && (searchResults !== null ? searchResults.length > 0 : files.length > 0) && (
-            <div className="master-select-bar">
-              <input
-                type="checkbox"
-                id="master-select-checkbox"
-                className="master-select-checkbox"
-                checked={
-                  (searchResults !== null ? searchResults : files).length > 0 &&
-                  (searchResults !== null ? searchResults : files).every(f => selectedPaths.has(f.path))
-                }
-                onChange={() => {
-                  const items = searchResults !== null ? searchResults : files;
-                  const allSel = items.length > 0 && items.every(f => selectedPaths.has(f.path));
-                  if (allSel) {
-                    setSelectedPaths(new Set());
-                  } else {
-                    setSelectedPaths(new Set(items.map(f => f.path)));
-                  }
-                }}
-              />
-              <label htmlFor="master-select-checkbox" style={{ cursor: 'pointer', userSelect: 'none' }}>
-                Select All
-              </label>
-            </div>
-          )}
-
-          {/* ── Search results view ────────────────────────────────────────── */}
-          {searchResults !== null && viewSection === 'my-files' ? (
-            searchLoading ? (
-              <div className="files-empty"><div className="spinner" /></div>
-            ) : searchError ? (
-              <div className="files-empty">
-                <Search size={48} style={{ opacity: .15 }} />
-                <div>
-                  <p className="files-empty-title">Search error</p>
-                  <p className="files-empty-text">{searchError}</p>
-                </div>
-              </div>
-            ) : searchResults.length === 0 ? (
-              <div className="files-empty">
-                <Search size={72} aria-hidden style={{ opacity: .15 }} />
-                <div>
-                  <p className="files-empty-title">No results for &ldquo;{searchQuery}&rdquo;</p>
-                  <p className="files-empty-text">
-                    Images are tagged nightly. Try again after the next batch run,
-                    or check that your images have been processed.
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div>
-                <p className="search-results-meta">
-                  {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for &ldquo;{searchQuery}&rdquo;
-                </p>
-                <FileGrid
-                  files={searchResults}
-                  owner={null}
-                  isReadOnly={false}
-                  onOpen={handleOpen}
-                  onDelete={handleDelete}
-                  onShare={setShareTarget}
-                  selectedPaths={selectedPaths}
-                  onToggleSelect={handleToggleSelect}
-                  onRename={handleRenameInit}
-                />
-              </div>
-            )
+        <main
+          className="files-area"
+          id="files-area"
+          style={(viewSection === 'agent' || viewSection === 'approvals' || viewSection === 'secrets') ? { padding: 0, overflow: 'hidden', height: '100%' } : {}}
+          onScroll={handleScroll}
+        >
+          {viewSection === 'agent' ? (
+            <AgentPanel showToast={showToast} />
+          ) : viewSection === 'approvals' ? (
+            <UserApprovalsPanel showToast={showToast} onRefreshCount={setPendingCount} />
+          ) : viewSection === 'secrets' ? (
+            <SecretsVaultPanel showToast={showToast} />
           ) : (
-            /* ── Normal browser / shared view ────────────────────────────── */
-            viewSection === 'shared' && !sharedOwner ? (
-              sharedFolders.length === 0 ? (
-                <div className="files-empty">
-                  <Share2 size={72} aria-hidden style={{ opacity: .15 }} />
+            <>
+              {/* Master Select Bar */}
+              {viewSection === 'my-files' && (searchResults !== null ? searchResults.length > 0 : files.length > 0) && (
+                <div className="master-select-bar">
+                  <input
+                    type="checkbox"
+                    id="master-select-checkbox"
+                    className="master-select-checkbox"
+                    checked={
+                      (searchResults !== null ? searchResults : files).length > 0 &&
+                      (searchResults !== null ? searchResults : files).every(f => selectedPaths.has(f.path))
+                    }
+                    onChange={() => {
+                      const items = searchResults !== null ? searchResults : files;
+                      const allSel = items.length > 0 && items.every(f => selectedPaths.has(f.path));
+                      if (allSel) {
+                        setSelectedPaths(new Set());
+                      } else {
+                        setSelectedPaths(new Set(items.map(f => f.path)));
+                      }
+                    }}
+                  />
+                  <label htmlFor="master-select-checkbox" style={{ cursor: 'pointer', userSelect: 'none' }}>
+                    Select All
+                  </label>
+                </div>
+              )}
+
+              {/* ── Search results view ────────────────────────────────────────── */}
+              {searchResults !== null && viewSection === 'my-files' ? (
+                searchLoading ? (
+                  <div className="files-empty"><div className="spinner" /></div>
+                ) : searchError ? (
+                  <div className="files-empty">
+                    <Search size={48} style={{ opacity: .15 }} />
+                    <div>
+                      <p className="files-empty-title">Search error</p>
+                      <p className="files-empty-text">{searchError}</p>
+                    </div>
+                  </div>
+                ) : searchResults.length === 0 ? (
+                  <div className="files-empty">
+                    <Search size={72} aria-hidden style={{ opacity: .15 }} />
+                    <div>
+                      <p className="files-empty-title">No results for &ldquo;{searchQuery}&rdquo;</p>
+                      <p className="files-empty-text">
+                        Images are tagged nightly. Try again after the next batch run,
+                        or check that your images have been processed.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
                   <div>
-                    <p className="files-empty-title">Nothing shared with you yet</p>
-                    <p className="files-empty-text">When someone shares a folder with you, it will appear here.</p>
+                    <p className="search-results-meta">
+                      {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for &ldquo;{searchQuery}&rdquo;
+                    </p>
+                    <FileGrid
+                      files={displayedSearchResults}
+                      owner={null}
+                      isReadOnly={false}
+                      onOpen={handleOpen}
+                      onDelete={handleDelete}
+                      onShare={setShareTarget}
+                      selectedPaths={selectedPaths}
+                      onToggleSelect={handleToggleSelect}
+                      onRename={handleRenameInit}
+                    />
                   </div>
-                </div>
+                )
               ) : (
-                <div>
-                  <p style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 16 }}>
-                    {sharedFolders.length} folder{sharedFolders.length !== 1 ? 's' : ''} shared with you
-                  </p>
-                  <div className="shared-folders-grid">
-                    {sharedFolders.map(share => (
-                      <SharedFolderCard
-                        key={share.id}
-                        share={share}
-                        onOpen={openSharedFolder}
-                      />
-                    ))}
+                /* ── Normal browser / shared view ────────────────────────────── */
+                viewSection === 'shared' && !sharedOwner ? (
+                  sharedFolders.length === 0 ? (
+                    <div className="files-empty">
+                      <Share2 size={72} aria-hidden style={{ opacity: .15 }} />
+                      <div>
+                        <p className="files-empty-title">Nothing shared with you yet</p>
+                        <p className="files-empty-text">When someone shares a folder with you, it will appear here.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <p style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 16 }}>
+                        {sharedFolders.length} folder{sharedFolders.length !== 1 ? 's' : ''} shared with you
+                      </p>
+                      <div className="shared-folders-grid">
+                        {sharedFolders.map(share => (
+                          <SharedFolderCard
+                            key={share.id}
+                            share={share}
+                            onOpen={openSharedFolder}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )
+                ) : loading ? (
+                  <div className="files-empty"><div className="spinner" /></div>
+                ) : fetchError ? (
+                  <div className="files-empty">
+                    <p style={{ color: 'var(--error)', marginBottom: 12 }}>{fetchError}</p>
+                    <button className="btn btn-secondary btn-sm" onClick={fetchFiles}>Retry</button>
                   </div>
-                </div>
-              )
-            ) : loading ? (
-              <div className="files-empty"><div className="spinner" /></div>
-            ) : fetchError ? (
-              <div className="files-empty">
-                <p style={{ color: 'var(--error)', marginBottom: 12 }}>{fetchError}</p>
-                <button className="btn btn-secondary btn-sm" onClick={fetchFiles}>Retry</button>
-              </div>
-            ) : files.length === 0 ? (
-              <div className="files-empty">
-                <Cloud size={72} aria-hidden />
-                <div>
-                  <p className="files-empty-title">This folder is empty</p>
-                  {viewSection === 'my-files' && (
-                    <p className="files-empty-text">Drag files here or click <strong>Upload</strong></p>
-                  )}
-                </div>
-              </div>
-            ) : viewMode === 'grid' ? (
-              <FileGrid
-                files={files}
-                owner={sharedOwner}
-                isReadOnly={viewSection === 'shared'}
-                onOpen={handleOpen}
-                onDelete={handleDelete}
-                onShare={setShareTarget}
-                selectedPaths={selectedPaths}
-                onToggleSelect={handleToggleSelect}
-                onRename={handleRenameInit}
-              />
-            ) : (
-              <FileList
-                files={files}
-                owner={sharedOwner}
-                isReadOnly={viewSection === 'shared'}
-                onOpen={handleOpen}
-                onDelete={handleDelete}
-                onShare={setShareTarget}
-                selectedPaths={selectedPaths}
-                onToggleSelect={handleToggleSelect}
-                onRename={handleRenameInit}
-              />
-            )
+                ) : files.length === 0 ? (
+                  <div className="files-empty">
+                    <Cloud size={72} aria-hidden />
+                    <div>
+                      <p className="files-empty-title">This folder is empty</p>
+                      {viewSection === 'my-files' && (
+                        <p className="files-empty-text">Drag files here or click <strong>Upload</strong></p>
+                      )}
+                    </div>
+                  </div>
+                ) : viewMode === 'grid' ? (
+                  <FileGrid
+                    files={displayedFiles}
+                    owner={sharedOwner}
+                    isReadOnly={viewSection === 'shared'}
+                    onOpen={handleOpen}
+                    onDelete={handleDelete}
+                    onShare={setShareTarget}
+                    selectedPaths={selectedPaths}
+                    onToggleSelect={handleToggleSelect}
+                    onRename={handleRenameInit}
+                  />
+                ) : (
+                  <FileList
+                    files={displayedFiles}
+                    owner={sharedOwner}
+                    isReadOnly={viewSection === 'shared'}
+                    onOpen={handleOpen}
+                    onDelete={handleDelete}
+                    onShare={setShareTarget}
+                    selectedPaths={selectedPaths}
+                    onToggleSelect={handleToggleSelect}
+                    onRename={handleRenameInit}
+                  />
+                )
+              )}
+            </>
           )}
         </main>
       </div>

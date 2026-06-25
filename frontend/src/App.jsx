@@ -4,6 +4,7 @@ import { api } from './api/client.js';
 import LoginPage    from './pages/LoginPage.jsx';
 import RegisterPage from './pages/RegisterPage.jsx';
 import FilesPage    from './pages/FilesPage.jsx';
+import PublicSharePage from './pages/PublicSharePage.jsx';
 
 // ── Auth context ──────────────────────────────────────────────────────────────
 const AuthContext = createContext(null);
@@ -49,6 +50,7 @@ export default function App() {
         <Routes>
           <Route path="/login"    element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          <Route path="/:alias"   element={<PublicSharePage />} />
           <Route
             path="/*"
             element={

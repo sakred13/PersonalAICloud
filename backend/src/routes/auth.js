@@ -73,7 +73,7 @@ router.post('/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 12);
 
     const result = await pool.query(
-      'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, created_at',
+      'INSERT INTO users (username, email, password_hash, is_approved) VALUES ($1, $2, $3, FALSE) RETURNING id, username, email, created_at',
       [username, email, passwordHash]
     );
     const user = result.rows[0];
@@ -81,10 +81,9 @@ router.post('/register', async (req, res) => {
     // Create isolated storage folder for this user
     await fs.ensureDir(getUserRoot(username));
 
-    issueToken(res, user.id, user.username);
-
     return res.status(201).json({
-      user: { id: user.id, username: user.username, email: user.email, createdAt: user.created_at },
+      success: true,
+      message: 'Registration successful. Account pending approval.',
     });
   } catch (err) {
     console.error('[register]', err.message);
@@ -102,7 +101,7 @@ router.post('/login', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT id, username, password_hash FROM users WHERE username = $1',
+      'SELECT id, username, password_hash, is_approved FROM users WHERE username = $1',
       [username]
     );
 
@@ -120,6 +119,10 @@ router.post('/login', async (req, res) => {
 
     if (!valid) {
       return res.status(401).json({ error: GENERIC_ERROR });
+    }
+
+    if (!user.is_approved) {
+      return res.status(403).json({ error: 'Your account is pending approval' });
     }
 
     issueToken(res, user.id, user.username);
@@ -167,4 +170,64 @@ router.get('/check-username', async (req, res) => {
   return res.json({ available: result.rows.length === 0 });
 });
 
+// ─── GET /api/auth/pending ───────────────────────────────────────────────────
+router.get('/pending', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, username, email, created_at FROM users WHERE is_approved = FALSE ORDER BY created_at DESC'
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    console.error('[pending]', err.message);
+    return res.status(500).json({ error: 'Failed to retrieve pending users' });
+  }
+});
+
+// ─── POST /api/auth/approve/:id ────────────────────────────────────────────────
+router.post('/approve/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'UPDATE users SET is_approved = TRUE WHERE id = $1 RETURNING id, username, email',
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    return res.json({ success: true, message: 'User approved successfully', user: result.rows[0] });
+  } catch (err) {
+    console.error('[approve]', err.message);
+    return res.status(500).json({ error: 'Failed to approve user' });
+  }
+});
+
+// ─── POST /api/auth/reject/:id ─────────────────────────────────────────────────
+router.post('/reject/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Retrieve username first to remove the disk folder
+    const userResult = await pool.query('SELECT username FROM users WHERE id = $1', [id]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const username = userResult.rows[0].username;
+
+    // Delete user from db (cascades to shares, file_tags, agent_chats, public_shares)
+    await pool.query('DELETE FROM users WHERE id = $1', [id]);
+
+    // Clean up storage disk recursively
+    const userRoot = getUserRoot(username);
+    if (await fs.pathExists(userRoot)) {
+      await fs.remove(userRoot);
+    }
+
+    return res.json({ success: true, message: 'User rejected and storage cleaned up' });
+  } catch (err) {
+    console.error('[reject]', err.message);
+    return res.status(500).json({ error: 'Failed to reject user' });
+  }
+});
+
 module.exports = router;
+

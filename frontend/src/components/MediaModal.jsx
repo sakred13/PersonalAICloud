@@ -23,12 +23,25 @@ export default function MediaModal({
   onClose,
   onPrev,
   onNext,
+  isPublicShare,
+  publicAlias,
+  publicToken,
 }) {
   const backdropRef  = useRef(null);
   const hasMultiple  = files.length > 1;
   const isRaw       = isDngRaw(file);
-  const fileUrl      = isRaw ? getPreviewUrl(file.path, owner) : getFileUrl(file.path, owner);
-  const downloadUrl  = getDownloadUrl(file.path, owner);
+
+  const fileUrl = isPublicShare
+    ? (isRaw
+      ? `/api/public/shares/preview/${publicAlias}?path=${encodeURIComponent(file.path)}${publicToken ? `&token=${encodeURIComponent(publicToken)}` : ''}`
+      : `/api/public/shares/view/${publicAlias}?path=${encodeURIComponent(file.path)}${publicToken ? `&token=${encodeURIComponent(publicToken)}` : ''}`)
+    : isRaw
+      ? getPreviewUrl(file.path, owner)
+      : getFileUrl(file.path, owner);
+
+  const downloadUrl = isPublicShare
+    ? `/api/public/shares/download/${publicAlias}?path=${encodeURIComponent(file.path)}${publicToken ? `&token=${encodeURIComponent(publicToken)}` : ''}`
+    : getDownloadUrl(file.path, owner);
   const [imgLoaded, setImgLoaded] = useState(false);
   const [imgError, setImgError]   = useState(false);
 
@@ -64,7 +77,7 @@ export default function MediaModal({
 
     if (mime.startsWith('image/') || isRaw) {
       return (
-        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', maxWidth: '100%', maxHeight: '100%' }}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
           {!imgLoaded && !imgError && (
             <div style={{ position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: 'var(--text-2)' }}>
               <Loader size={36} style={{ animation: 'spin 1s linear infinite' }} />

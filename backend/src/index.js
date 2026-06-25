@@ -9,6 +9,8 @@ const { connectWithRetry } = require('./lib/db');
 const authRoutes  = require('./routes/auth');
 const filesRoutes = require('./routes/files');
 const sharesRoutes = require('./routes/shares');
+const agentRoutes = require('./routes/agent');
+const publicSharesRoutes = require('./routes/publicShares');
 
 if (!process.env.JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is not set');
@@ -42,6 +44,8 @@ app.use(cookieParser());
 app.use('/api/auth',   authRoutes);
 app.use('/api/files',  filesRoutes);
 app.use('/api/shares', sharesRoutes);
+app.use('/api/agent',  agentRoutes);
+app.use('/api/public/shares', publicSharesRoutes);
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

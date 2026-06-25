@@ -12,26 +12,31 @@ To add retry logic later: add a conditional edge from call_llm → retry_node.
 To add other media types later: add a parallel branch in walk_files.
 """
 import ast
-import base64
 import json
 import logging
 import os
-import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from io import BytesIO
 from pathlib import Path
-from typing import Annotated, TypedDict
+from typing import TypedDict
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
-from PIL import Image
 
 from ..config import settings
 from ..db import fetch_all_users, get_tagged_paths, upsert_tags
 from .base import BaseTool, JobResult
+from .media_processor import (
+    get_llm,
+    encode_image,
+    extract_text_from_pdf,
+    extract_text_from_txt,
+    transcribe_audio,
+    get_video_metadata,
+    extract_keyframes,
+    extract_audio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +59,7 @@ class TaggingState(TypedDict):
 def node_fetch_users(state: TaggingState) -> dict:
     """
     Load all users from the database.
-    Also computes the hard deadline for this run: today at JOB_END_HOUR in the configured timezone.
+    Also computes the hard deadline for this run: today at JOB_END_HOUR:JOB_END_MINUTE in the configured timezone.
     If the job somehow starts after that hour (e.g. manual trigger), the
     deadline is pushed to the same hour tomorrow so it still gets a full run.
     """
@@ -64,7 +69,7 @@ def node_fetch_users(state: TaggingState) -> dict:
     tz = ZoneInfo(settings.TIMEZONE)
     now = datetime.now(tz=tz)
     deadline = now.replace(
-        hour=settings.JOB_END_HOUR, minute=0, second=0, microsecond=0
+        hour=settings.JOB_END_HOUR, minute=settings.JOB_END_MINUTE, second=0, microsecond=0
     )
     # If we're already past today's deadline (e.g. manual trigger at noon),
     # push to the same hour tomorrow so the run isn't dead on arrival.
@@ -72,10 +77,11 @@ def node_fetch_users(state: TaggingState) -> dict:
         deadline += timedelta(days=1)
 
     logger.info(
-        "[tag_images] Deadline: %s %s (JOB_END_HOUR=%d)",
+        "[tag_images] Deadline: %s %s (JOB_END_HOUR=%d, JOB_END_MINUTE=%d)",
         deadline.strftime("%H:%M"),
         settings.TIMEZONE,
         settings.JOB_END_HOUR,
+        settings.JOB_END_MINUTE,
     )
     return {"users": users, "deadline": deadline}
 
@@ -152,23 +158,6 @@ def node_filter_new(state: TaggingState) -> dict:
     return {"pending": filtered}
 
 
-def _encode_image(abs_path: str) -> str:
-    """
-    Resize the image to MAX_IMAGE_SIZE on the longest axis (to keep token
-    usage reasonable) and return a base64-encoded JPEG string.
-    """
-    with Image.open(abs_path) as img:
-        img = img.convert("RGB")
-        max_px = settings.MAX_IMAGE_SIZE
-        w, h = img.size
-        if w > max_px or h > max_px:
-            ratio = min(max_px / w, max_px / h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
 _TAG_PROMPT = """You are a photo-tagging assistant. Analyse this image and return ONLY a
 JSON array of concise, lowercase, single-word or short-phrase descriptive tags.
 
@@ -201,150 +190,6 @@ Rules:
 - Output ONLY valid JSON, e.g.: ["meeting", "project plan", "quarterly", "marketing", "schedule"]
 """
 
-_llm: ChatOpenAI | None = None
-
-def _get_llm() -> ChatOpenAI:
-    """Lazily initialise the LLM client (once per process)."""
-    global _llm
-    if _llm is None:
-        _llm = ChatOpenAI(
-            base_url=settings.LLM_BASE_URL,
-            api_key=settings.LLM_API_KEY,
-            model=settings.LLM_MODEL,
-            temperature=0.1,
-            max_tokens=2048,
-        )
-    return _llm
-
-
-def _extract_text_from_pdf(abs_path: str) -> str:
-    """Extract up to Settings.MAX_TEXT_CHARS characters from a PDF file."""
-    import pypdf
-    try:
-        reader = pypdf.PdfReader(abs_path)
-        text = []
-        chars_left = settings.MAX_TEXT_CHARS
-        for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                if len(t) > chars_left:
-                    text.append(t[:chars_left])
-                    break
-                else:
-                    text.append(t)
-                    chars_left -= len(t)
-        return "\n".join(text).strip()
-    except Exception as exc:
-        logger.warning("[tag_images] PDF extraction error on %s: %s", abs_path, exc)
-        return ""
-
-
-def _extract_text_from_txt(abs_path: str) -> str:
-    """Read up to Settings.MAX_TEXT_CHARS from a plain text/markdown file."""
-    try:
-        with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read(settings.MAX_TEXT_CHARS).strip()
-    except Exception as exc:
-        logger.warning("[tag_images] Text extraction error on %s: %s", abs_path, exc)
-        return ""
-
-
-_whisper_model = None
-
-def _get_whisper_model():
-    """Lazily load the Whisper model on CPU."""
-    global _whisper_model
-    if _whisper_model is None:
-        import whisper
-        import torch
-        logger.info("[tag_images] Setting PyTorch CPU threads limit to 2 ...")
-        torch.set_num_threads(2)
-        logger.info("[tag_images] Loading Whisper model '%s' (device=cpu) ...", settings.WHISPER_MODEL)
-        _whisper_model = whisper.load_model(settings.WHISPER_MODEL, device="cpu")
-    return _whisper_model
-
-
-def _transcribe_audio(abs_path: str) -> str:
-    """Transcribe an audio file using Whisper on CPU."""
-    try:
-        model = _get_whisper_model()
-        result = model.transcribe(abs_path)
-        return result.get("text", "").strip()[:settings.MAX_TEXT_CHARS]
-    except Exception as exc:
-        logger.warning("[tag_images] Audio transcription error on %s: %s", abs_path, exc)
-        return ""
-
-
-def _get_video_metadata(abs_path: str) -> tuple[float, int]:
-    """Get video duration in seconds and file size in bytes using ffprobe and os.path."""
-    try:
-        file_size = os.path.getsize(abs_path)
-        cmd = [
-            "ffprobe", "-v", "error", 
-            "-show_entries", "format=duration", 
-            "-of", "default=noprint_wrappers=1:nokey=1", 
-            abs_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        duration = float(result.stdout.strip())
-        return duration, file_size
-    except Exception as exc:
-        logger.warning("[tag_images] Error reading video metadata for %s: %s", abs_path, exc)
-        return 0.0, 0
-
-
-def _extract_keyframes(abs_path: str, duration: float) -> list[str]:
-    """Extract keyframes as temporary JPEG files and return their paths."""
-    keyframe_paths = []
-    if duration <= 0:
-        return keyframe_paths
-        
-    num_frames = settings.VIDEO_KEYFRAMES_COUNT
-    timestamps = [duration * (i + 1) / (num_frames + 1) for i in range(num_frames)]
-    
-    for i, ts in enumerate(timestamps):
-        try:
-            tmp_fd, tmp_name = tempfile.mkstemp(suffix=f"_frame_{i}.jpg")
-            os.close(tmp_fd)
-            cmd = [
-                "ffmpeg", "-y", 
-                "-ss", f"{ts:.3f}", 
-                "-i", abs_path, 
-                "-frames:v", "1", 
-                "-q:v", "2", 
-                tmp_name
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            if os.path.exists(tmp_name) and os.path.getsize(tmp_name) > 0:
-                keyframe_paths.append(tmp_name)
-            else:
-                logger.warning("[tag_images] FFmpeg extracted empty keyframe at %s for %s", ts, abs_path)
-        except Exception as exc:
-            logger.warning("[tag_images] Failed to extract keyframe at %s for %s: %s", ts, abs_path, exc)
-    return keyframe_paths
-
-
-def _extract_audio(abs_path: str) -> str:
-    """Extract audio track to a temporary MP3 file and return the path."""
-    try:
-        tmp_fd, tmp_name = tempfile.mkstemp(suffix="_extracted_audio.mp3")
-        os.close(tmp_fd)
-        cmd = [
-            "ffmpeg", "-y", 
-            "-i", abs_path, 
-            "-vn", 
-            "-acodec", "libmp3lame", 
-            "-ar", "16000", 
-            "-ac", "1", 
-            tmp_name
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        if os.path.exists(tmp_name) and os.path.getsize(tmp_name) > 0:
-            return tmp_name
-    except Exception as exc:
-        logger.warning("[tag_images] Failed to extract audio track from %s: %s", abs_path, exc)
-    return ""
-
 
 
 def _call_text_llm(text_content: str, prompt: str) -> list[str]:
@@ -354,7 +199,7 @@ def _call_text_llm(text_content: str, prompt: str) -> list[str]:
     message = HumanMessage(
         content=f"{prompt}\n\nDocument/Transcript text:\n{text_content}"
     )
-    response = _get_llm().invoke([message])
+    response = get_llm().invoke([message])
     raw = response.content.strip()
 
     # Extract JSON array from the response
@@ -381,7 +226,7 @@ def _call_text_llm(text_content: str, prompt: str) -> list[str]:
 
 def _call_vision(abs_path: str) -> list[str]:
     """Send a single image to Gemma 4 and parse the returned tag list."""
-    b64 = _encode_image(abs_path)
+    b64 = encode_image(abs_path)
     message = HumanMessage(
         content=[
             {"type": "text", "text": _TAG_PROMPT},
@@ -391,7 +236,7 @@ def _call_vision(abs_path: str) -> list[str]:
             },
         ]
     )
-    response = _get_llm().invoke([message])
+    response = get_llm().invoke([message])
     raw = response.content.strip()
 
     # Extract JSON array from the response (model may wrap it in markdown)
@@ -440,23 +285,23 @@ def node_call_llm(state: TaggingState) -> dict:
                 tags = _call_vision(abs_path)
             elif file_type == "document":
                 if ext == ".pdf":
-                    text = _extract_text_from_pdf(abs_path)
+                    text = extract_text_from_pdf(abs_path)
                 else:
-                    text = _extract_text_from_txt(abs_path)
+                    text = extract_text_from_txt(abs_path)
                 
                 if text:
                     tags = _call_text_llm(text, _DOC_TAG_PROMPT)
                 else:
                     tags = [ext[1:]]  # fallback
             elif file_type == "audio":
-                transcript = _transcribe_audio(abs_path)
+                transcript = transcribe_audio(abs_path)
                 if transcript:
                     tags = _call_text_llm(transcript, _AUDIO_TAG_PROMPT)
                 else:
                     tags = ["audio", ext[1:]]  # fallback
             elif file_type == "video":
                 # Metadata check for guardrails
-                duration, file_size = _get_video_metadata(abs_path)
+                duration, file_size = get_video_metadata(abs_path)
                 if file_size > settings.MAX_VIDEO_SIZE:
                     logger.info("[tag_images] Skipping %s: size %s MB exceeds limit %s MB", 
                                 item["rel_path"], file_size // 1024 // 1024, settings.MAX_VIDEO_SIZE // 1024 // 1024)
@@ -471,7 +316,7 @@ def node_call_llm(state: TaggingState) -> dict:
                 keyframe_paths = []
                 try:
                     # 1. Process visual track
-                    keyframe_paths = _extract_keyframes(abs_path, duration)
+                    keyframe_paths = extract_keyframes(abs_path, duration)
                     for kf in keyframe_paths:
                         try:
                             kf_tags = _call_vision(kf)
@@ -480,9 +325,9 @@ def node_call_llm(state: TaggingState) -> dict:
                             logger.warning("[tag_images] Error tagging keyframe %s: %s", kf, kf_exc)
                     
                     # 2. Process audio track
-                    audio_path = _extract_audio(abs_path)
+                    audio_path = extract_audio(abs_path)
                     if audio_path:
-                        transcript = _transcribe_audio(audio_path)
+                        transcript = transcribe_audio(audio_path)
                         if transcript:
                             try:
                                 audio_tags = _call_text_llm(transcript, _AUDIO_TAG_PROMPT)

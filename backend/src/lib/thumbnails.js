@@ -4,6 +4,9 @@ const mime = require('mime-types');
 const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 
+// Disable sharp cache to prevent file locking on Windows
+sharp.cache(false);
+
 const { getUserRoot, getThumbnailPath, getPreviewPath } = require('./pathGuard');
 
 const THUMB_WIDTH = 400;

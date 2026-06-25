@@ -16,6 +16,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from ..tools.base import JobResult
 from ..tools.tag_images import TagImagesTool
+from ..tools.generate_thumbnails import GenerateThumbnailsTool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 # Add new tools here — the router handles the rest automatically.
 TOOL_REGISTRY: dict[str, object] = {
     TagImagesTool.name: TagImagesTool(),
+    GenerateThumbnailsTool.name: GenerateThumbnailsTool(),
     # future: "transcribe_audio": TranscribeAudioTool(),
     # future: "summarise_docs": SummariseDocsTool(),
 }

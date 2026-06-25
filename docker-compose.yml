@@ -51,8 +51,10 @@ services:
       LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e4b}
       LLM_API_KEY: ${LLM_API_KEY:-lm-studio}
       AGENT_CRON: ${AGENT_CRON:-0 2 * * *}
+      JOB_END_HOUR: ${JOB_END_HOUR:-2}
+      JOB_END_MINUTE: ${JOB_END_MINUTE:-30}
     volumes:
-      - ./storage:/storage:ro   # read-only — agent never writes files
+      - ./storage:/storage
     networks:
       - internal
     # Needed on Linux hosts so containers can reach host.docker.internal.
